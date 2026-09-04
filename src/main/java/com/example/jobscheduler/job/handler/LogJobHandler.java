@@ -1,5 +1,6 @@
 package com.example.jobscheduler.job.handler;
 
+import com.example.jobscheduler.job.enums.EJobStatus;
 import com.example.jobscheduler.job.enums.EJobType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,8 +13,8 @@ public class LogJobHandler implements JobHandler {
     private static final Logger logger = LoggerFactory.getLogger(LogJobHandler.class);
 
     @Override
-    public String getType() {
-        return EJobType.LOG.toString();
+    public EJobType getType() {
+        return EJobType.LOG;
     }
 
     @Override

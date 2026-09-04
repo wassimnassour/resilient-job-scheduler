@@ -1,5 +1,6 @@
 package com.example.jobscheduler.job.handler;
 
+import com.example.jobscheduler.job.enums.EJobType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
@@ -12,20 +13,20 @@ import static org.mockito.Mockito.when;
 public class JobHandlerRegistryTest {
 
     @Test
-    void getHandler_ShouldReturnHandler_whenJobTypeIsRegister() {
-        String JobType = "EMAIL";
+    void getHandler_ShouldReturnHandler_whenJobTypeIsRegistered() {
+        EJobType jobType = EJobType.LOG;
         JobHandler handler = mock(JobHandler.class);
-        when(handler.getType()).thenReturn(JobType);
+        when(handler.getType()).thenReturn(jobType);
 
         JobHandlerRegistry registry = new JobHandlerRegistry(List.of(handler));
-        JobHandler result = registry.getHandler("EMAIL");
+        JobHandler result = registry.getHandler(EJobType.LOG);
 
         assertSame(result, handler);
     }
 
     @Test
     void getHandler_shouldReturnError_whenJobTypeIsDuplicated() {
-        String JobType = "EMAIL";
+        EJobType JobType = EJobType.EMAIL;
 //        Arrange
         JobHandler firstHandler = mock(JobHandler.class);
         when(firstHandler.getType()).thenReturn(JobType);
@@ -40,8 +41,8 @@ public class JobHandlerRegistryTest {
 
     @Test
     void getHandler_shouldReturnError_whenTryToGetHandlerNotExists() {
-        String type = "LOG";
-        String typeToCheckOn = "EMAIL";
+        EJobType type = EJobType.LOG;
+        EJobType typeToCheckOn = EJobType.EMAIL;
 
         JobHandler handler = mock(JobHandler.class);
         when(handler.getType()).thenReturn(type);
