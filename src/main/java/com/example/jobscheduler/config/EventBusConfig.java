@@ -14,7 +14,7 @@ public class EventBusConfig {
     @Value("${eventbus.worker-threads:4}")
     private int workerThreads;
 
-    @Bean(destroyMethod = "close")
+    @Bean()
     public EventBus eventBus() {
         return new AsyncEventBus(Executors.newFixedThreadPool(workerThreads), workerThreads);
     }
