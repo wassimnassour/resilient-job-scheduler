@@ -1,255 +1,137 @@
-# EventBus 🚀
+# Resilient Job Scheduler
 
-A lightweight, high-performance, in-memory **Asynchronous Event Bus** implementation for Spring Boot applications powered by Java 21.
+A Spring Boot application for scheduling and executing durable background jobs.
 
----
+The project is being built incrementally. Its goal is to reliably run work after
+the request that created it has finished, while preserving job state so pending
+work can be recovered and retried.
 
-## 📑 Table of Contents
+## Current Progress
 
-- [Overview](#overview)
-- [Key Features](#key-features)
-- [Architecture & Design](#architecture--design)
-- [Tech Stack](#tech-stack)
-- [Getting Started](#getting-started)
-- [API Endpoints](#api-endpoints)
-- [Usage & Code Examples](#usage--code-examples)
-  - [1. Defining an Event](#1-defining-an-event)
-  - [2. Subscribing Listeners](#2-subscribing-listeners)
-  - [3. Publishing Events](#3-publishing-events)
-  - [4. Polymorphic / Fanout Auditing](#4-polymorphic--fanout-auditing)
-- [Project Structure](#project-structure)
+The foundation for the scheduler is in place:
 
----
+- Jobs are modelled as JPA entities and persisted in an H2 database.
+- A job has a type, JSON payload, schedule time, timestamps, and lifecycle
+  status.
+- Supported states are `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`,
+  `RETRYING`, and `EXHAUSTED`.
+- `JobRepository.findReadyJobs(...)` finds pending jobs whose scheduled time
+  has arrived.
+- A `JobHandlerRegistry` maps each job type to exactly one handler and fails
+  fast for unsupported or duplicate types.
+- `JobScheduler` delegates a job payload to the matching handler.
+- `LOG` is the first available job type; its handler writes the payload to the
+  application log.
 
-## 🎯 Overview
+## Architecture
 
-This project provides a decoupled, non-blocking event-driven architecture within a Spring Boot application. Domain services (such as **Orders** and **Clients**) publish domain events to the `EventBus`, where a background worker pool delivers them asynchronously to all registered listeners.
-
----
-
-## ✨ Key Features
-
-- **⚡ Asynchronous & Non-Blocking**: Event producers publish events immediately without blocking on listener execution.
-- **🔒 Thread-Safe & Concurrent**: Uses `ConcurrentHashMap` and `CopyOnWriteArrayList` for lock-free listener registration and dynamic unsubscription.
-- **🔀 Polymorphic Event Dispatching**: Supports class-hierarchy matching with Java 21 `sealed interfaces`—allowing subscribers to listen to specific events or all events under a parent interface (like a topic/fanout exchange).
-- **🛡️ Fault Isolation & Resilience**: Individual subscriber failures are caught and logged without affecting other listeners or killing consumer worker threads.
-- **🧹 Graceful Lifecycle Management**: Implements `AutoCloseable` to ensure executor threads and event queues are cleanly drained on application shutdown.
-
----
-
-## 🏗️ Architecture & Design
-
-```mermaid
-flowchart TD
-    subgraph Producers ["Event Producers (REST / Services)"]
-        OrderService["OrderService"]
-        ClientService["ClientService"]
-    end
-
-    subgraph EventBusEngine ["Async Event Bus Engine"]
-        Queue["LinkedBlockingQueue<Event>"]
-        Workers["Worker Pool (4 Threads)"]
-        Registry["Subscription Registry<br/>(ConcurrentHashMap)"]
-    end
-
-    subgraph Consumers ["Event Listeners"]
-        CrudListener["OrderCrudListener<br/>(OrderCreatedEvent, OrderCanceledEvent)"]
-        AuditListener["OrderAuditListener<br/>(OrderEvent - Fanout/Polymorphic)"]
-    end
-
-    OrderService -->|publish(event)| Queue
-    ClientService -->|publish(event)| Queue
-
-    Queue --> Workers
-    Workers -->|deliver(event)| Registry
-    Registry -->|dispatch| CrudListener
-    Registry -->|dispatch| AuditListener
+```text
+Job producer
+    |
+    v
+Job table (type, payload, status, scheduledAt)
+    |
+    v
+Ready-job query
+    |
+    v
+Job scheduler
+    |
+    v
+Job handler registry ---> LOG handler (current)
+                         Email / other handlers (planned)
 ```
 
----
-
-## 🛠️ Tech Stack
-
-- **Language**: Java 21
-- **Framework**: Spring Boot 3 / 4
-- **Persistence**: Spring Data JPA & H2 Database
-- **Utilities**: Lombok, SLF4J
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- **JDK 21** or higher installed
-- **Maven 3.8+** (or use the included `./mvnw` wrapper)
-
-### Run Locally
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/wassimnassour/Event-bus.git
-   cd Event-bus
-   ```
-
-2. **Build and start the application:**
-   ```bash
-   ./mvnw spring-boot:run
-   ```
-
-3. **Access H2 Database Console:**
-   - URL: `http://localhost:8080/h2-console`
-   - JDBC URL: `jdbc:h2:mem:testdb`
-   - User: `sa`
-   - Password: *(empty)*
-
----
-
-## 📡 API Endpoints
-
-### 🛒 Orders API
-
-| Method | Endpoint | Description | Sample Payload |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/orders` | Fetch all orders | — |
-| `POST` | `/orders` | Create an order & publish `OrderCreatedEvent` | `{"item": "Laptop", "quantity": 2}` |
-| `POST` | `/orders/cancel` | Cancel an order & publish `OrderCanceledEvent` | `{"orderId": 1}` |
-
-#### Example: Create Order
-```bash
-curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{"item": "Mechanical Keyboard", "quantity": 1}'
-```
-
-#### Example: Cancel Order
-```bash
-curl -X POST http://localhost:8080/orders/cancel \
-  -H "Content-Type: application/json" \
-  -d '{"orderId": 1}'
-```
-
----
-
-### 👤 Clients API
-
-| Method | Endpoint | Description | Sample Payload |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/clients` | Fetch all clients | — |
-| `POST` | `/clients` | Create a client & publish `ClientCreatedEvent` | `{"name": "Alice", "email": "alice@example.com"}` |
-
-#### Example: Create Client
-```bash
-curl -X POST http://localhost:8080/clients \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Alice Doe", "email": "alice@example.com"}'
-```
-
----
-
-## 💻 Usage & Code Examples
-
-### 1. Defining an Event
-
-Implement the core `Event` interface:
+Each `JobHandler` owns the behavior for one job type:
 
 ```java
-package com.example.eventBus.clients.event;
+public interface JobHandler {
+    String getType();
 
-import com.example.eventBus.config.Event;
-import java.time.Instant;
-
-public record ClientCreatedEvent(Long clientId, String name, String email, Instant occurredAt) implements Event {
-    public static ClientCreatedEvent now(Long clientId, String name, String email) {
-        return new ClientCreatedEvent(clientId, name, email, Instant.now());
-    }
+    void execute(JsonNode payload) throws Exception;
 }
 ```
 
-### 2. Subscribing Listeners
+To add a new job type, create a Spring `@Component` that implements this
+interface. The registry automatically discovers it through Spring injection.
 
-Register callbacks using method references or lambdas:
+## Roadmap
 
-```java
-@Configuration
-public class EventBusSubscriptions {
+### 1. Job Lifecycle
 
-    @PostConstruct
-    public void register(EventBus eventBus, OrderCrudListener crudListener) {
-        // Subscribe to a specific event
-        Subscription sub = eventBus.subscribe(OrderCreatedEvent.class, crudListener::createOrder);
+- Add a service and API for creating jobs with a type, payload, and scheduled
+  execution time.
+- Validate job types and payloads before persisting a job.
+- Expose job details and status for inspection.
 
-        // Optionally unsubscribe later:
-        // sub.unSubscribe();
-    }
-}
+### 2. Scheduled Execution
+
+- Poll for jobs that are due using `findReadyJobs(...)`.
+- Claim jobs safely by moving them from `PENDING` to `RUNNING`.
+- Execute jobs asynchronously and mark successful executions as `SUCCEEDED`.
+
+### 3. Failure Handling and Retries
+
+- Record failures and transition unsuccessful jobs to `RETRYING`.
+- Store attempt counts, error details, and the next retry time.
+- Use a backoff policy and mark jobs `EXHAUSTED` once retries are depleted.
+
+### 4. Resilience and Recovery
+
+- Recover jobs left in `RUNNING` after an application restart or worker crash.
+- Make execution idempotent where a handler can be retried safely.
+- Prevent multiple workers from executing the same job concurrently.
+
+### 5. Operations and Hardening
+
+- Add structured logs, metrics, and health checks for queue depth, latency, and
+  failures.
+- Add administrative actions for retrying, cancelling, and inspecting jobs.
+- Move from the in-memory H2 setup to a production database configuration.
+
+## Tech Stack
+
+- Java 21
+- Spring Boot 4
+- Spring Data JPA / Hibernate
+- H2 (development database)
+- Maven
+
+## Run Locally
+
+Prerequisites: JDK 21 and Maven 3.8+, or the included Maven wrapper.
+
+```bash
+./mvnw spring-boot:run
 ```
 
-### 3. Publishing Events
+The application starts on port `8080` by default. During local development, the
+H2 console is available at `http://localhost:8080/h2-console`.
 
-Inject the `EventBus` into your service and publish:
+Use the following connection details:
 
-```java
-@Service
-public class OrderServiceImpl implements OrderService {
-    private final EventBus eventBus;
-
-    public Order createOrder(CreateOrderCommand command) {
-        Order order = orderRepository.save(new Order(...));
-        
-        // Fire-and-forget asynchronous publishing
-        eventBus.publish(OrderCreatedEvent.now(order.getId(), order.getItem(), order.getQuantity()));
-        return order;
-    }
-}
+```text
+JDBC URL: jdbc:h2:mem:jobscheduler
+User:     sa
+Password: <empty>
 ```
 
-### 4. Polymorphic / Fanout Auditing
+## Test
 
-Use Java 21 `sealed interfaces` to capture all domain events under a parent type:
-
-```java
-public sealed interface OrderEvent extends Event permits OrderCreatedEvent, OrderCanceledEvent {}
-
-// Subscribing to the parent type captures both OrderCreatedEvent and OrderCanceledEvent
-eventBus.subscribe(OrderEvent.class, orderAuditListener::onAnyActionOnOrder);
+```bash
+./mvnw test
 ```
 
----
+## Project Structure
 
-## 📁 Project Structure
-
+```text
+src/main/java/com/example/jobscheduler/
+├── config/                 # Spring configuration
+├── job/
+│   ├── domain/             # Persisted Job entity
+│   ├── enums/              # Job types and lifecycle statuses
+│   ├── handler/            # JobHandler contract, registry, implementations
+│   ├── repository/         # Ready-job persistence queries
+│   └── scheduler/          # Handler delegation entry point
+└── ResilientJobSchedulerApplication.java
 ```
-src/main/java/com/example/eventBus/
-├── EventBusApplication.java
-├── config/
-│   ├── Consumer.java               # Functional interface for listener callbacks
-│   ├── Event.java                  # Base Event interface with timestamp
-│   ├── EventBusConfig.java         # Spring configuration & thread pool setup
-│   └── Subscription.java           # Unsubscribe handle
-├── eventBus/
-│   ├── EventBus.java               # Core EventBus contract
-│   ├── AsyncEventBus.java          # Asynchronous worker-backed EventBus implementation
-│   └── EventBusSubscriptions.java  # Listener registration registry
-├── orders/
-│   ├── command/                    # CreateOrderCommand, OrderCanceledCommand
-│   ├── controller/                 # Orders REST controller
-│   ├── event/                      # OrderEvent, OrderCreatedEvent, OrderCanceledEvent
-│   ├── listener/                   # OrderCrudListener, OrderAuditListener
-│   ├── model/                      # Order JPA entity
-│   ├── repository/                 # OrderRepository
-│   └── service/                    # OrderService, OrderServiceImpl
-└── clients/
-    ├── command/                    # CreateClientCommand
-    ├── controller/                 # ClientController
-    ├── event/                      # ClientCreatedEvent
-    ├── model/                      # Client JPA entity
-    ├── repository/                 # ClientRepository
-    └── service/                    # ClientService, ClientServiceImpl
-```
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License.
