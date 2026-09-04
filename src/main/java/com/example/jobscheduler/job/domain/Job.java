@@ -2,6 +2,7 @@ package com.example.jobscheduler.job.domain;
 
 import com.example.jobscheduler.job.enums.EJobType;
 import jakarta.persistence.*;
+import lombok.Data;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -10,6 +11,7 @@ import tools.jackson.databind.JsonNode;
 
 import java.time.Instant;
 
+@Data
 @Entity
 @Table(
         name = "job",
@@ -36,7 +38,7 @@ public class Job {
 
     @Column(name = "update_at", nullable = false)
     private Instant updatedAt;
-    
+
     private Instant scheduledAt;
 
 

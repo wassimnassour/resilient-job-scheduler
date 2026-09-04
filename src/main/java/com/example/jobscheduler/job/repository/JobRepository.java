@@ -4,6 +4,7 @@ import com.example.jobscheduler.job.domain.Job;
 import com.example.jobscheduler.job.enums.EJobStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
@@ -15,11 +16,12 @@ public interface JobRepository extends JpaRepository<Job, Long> {
                Select j from Job j
                  where j.status = :status
                  AND j.scheduledAt <= :now
-            
+                 order by j.scheduledAt asc
             """)
     List<Job> findReadyJobs(
             @Param("status") EJobStatus status,
-            @Param("now") Instant now
+            @Param("now") Instant now,
+            Pageable pageable
     );
 
 
