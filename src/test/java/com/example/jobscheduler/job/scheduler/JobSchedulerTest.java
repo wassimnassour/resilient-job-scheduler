@@ -21,14 +21,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 class JobSchedulerTest {
 
@@ -75,12 +73,17 @@ class JobSchedulerTest {
         Job failedJob = job(1L, failedPayload);
         Job succeedingJob = job(2L, objectMapper.readTree("{\"id\":2}"));
         CountDownLatch completed = new CountDownLatch(2);
+        CountDownLatch jobsSaved = new CountDownLatch(2);
 
         when(repository.findReadyJobs(any(), any(), any())).thenReturn(List.of(failedJob, succeedingJob));
         when(repository.claimJob(any(), any(), any(), any())).thenReturn(1);
         when(repository.findById(1L)).thenReturn(Optional.of(failedJob));
         when(repository.findById(2L)).thenReturn(Optional.of(succeedingJob));
         when(registry.getHandler(EJobType.LOG)).thenReturn(handler);
+        doAnswer(invocation -> {
+            jobsSaved.countDown();
+            return invocation.getArgument(0);
+        }).when(repository).save(any(Job.class));
         doAnswer(invocation -> {
             try {
                 if (failedPayload.equals(invocation.getArgument(0))) {
@@ -92,12 +95,14 @@ class JobSchedulerTest {
             }
         }).when(handler).execute(any(JsonNode.class));
 
-        scheduler(registry, repository, executor(2, 2)).pollDueJobs();
+        scheduler(registry, repository, executor(2, 2), 5).pollDueJobs();
 
         assertTrue(completed.await(1, TimeUnit.SECONDS));
+        assertTrue(jobsSaved.await(1, TimeUnit.SECONDS));
         verify(repository).save(failedJob);
         verify(repository).save(succeedingJob);
-        assertEquals(EJobStatus.FAILED, failedJob.getStatus());
+        assertEquals(EJobStatus.PENDING, failedJob.getStatus());
+        assertEquals(1, failedJob.getAttemptsCount());
         assertEquals(EJobStatus.SUCCEEDED, succeedingJob.getStatus());
     }
 
@@ -140,12 +145,87 @@ class JobSchedulerTest {
         verify(handler, times(5)).execute(any(JsonNode.class));
     }
 
+    @Test
+    public void pollDueJobs_shouldMakeJobExhausted_whenJobKeepsFailing() throws Exception {
+        JobRepository repository = mock(JobRepository.class);
+        JobHandlerRegistry registry = mock(JobHandlerRegistry.class);
+
+        JsonNode jsonPayload = objectMapper.readTree("{\"id\":1}");
+
+        Job pendingJob = job(1L, jsonPayload);
+        pendingJob.setAttemptsCount(4);
+
+        JobHandler handler = mock(JobHandler.class);
+
+        when(registry.getHandler(EJobType.LOG))
+                .thenReturn(handler);
+
+        doThrow(new IllegalStateException("Job failed"))
+                .when(handler)
+                .execute(jsonPayload);
+
+        when(repository.findReadyJobs(any(), any(), any()))
+                .thenReturn(List.of(pendingJob));
+        when(repository.claimJob(any(), any(), any(), any()))
+                .thenReturn(1);
+        when(repository.findById(1L))
+                .thenReturn(Optional.of(pendingJob));
+
+        when(repository.save(any(Job.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        scheduler(
+                registry,
+                repository,
+                executor(5, 10),
+                5
+        ).pollDueJobs();
+
+
+        await()
+                .atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> {
+                    assertEquals(EJobStatus.EXHAUSTED, pendingJob.getStatus());
+                    assertEquals(5, pendingJob.getAttemptsCount());
+                });
+    }
+
+    @Test
+    void processJob_schedulesThirdFailedAttemptWithTwentySecondDelay() throws Exception {
+        JobRepository repository = mock(JobRepository.class);
+        JobHandlerRegistry registry = mock(JobHandlerRegistry.class);
+        JobHandler handler = mock(JobHandler.class);
+        Job job = job(1L, objectMapper.readTree("{\"id\":1}"));
+        job.setAttemptsCount(2);
+        Instant beforeExecution = Instant.now();
+
+        when(repository.findById(1L)).thenReturn(Optional.of(job));
+        when(registry.getHandler(EJobType.LOG)).thenReturn(handler);
+        doThrow(new IllegalStateException("Job failed")).when(handler).execute(job.getPayload());
+
+        scheduler(registry, repository, executor(1, 1), 5).processJob(1L);
+
+        assertEquals(3, job.getAttemptsCount());
+        assertEquals(EJobStatus.PENDING, job.getStatus());
+        assertFalse(job.getScheduledAt().isBefore(beforeExecution.plusSeconds(20)));
+        assertFalse(job.getScheduledAt().isAfter(Instant.now().plusSeconds(20)));
+    }
+
     private JobScheduler scheduler(
             JobHandlerRegistry registry,
             JobRepository repository,
             ThreadPoolExecutor executor
     ) {
-        return new JobScheduler(registry, repository, 50, executor);
+        return scheduler(registry, repository, executor, 5);
+    }
+
+    private JobScheduler scheduler(
+            JobHandlerRegistry registry,
+            JobRepository repository,
+            ThreadPoolExecutor executor,
+            int maxAttempts
+    ) {
+        return new JobScheduler(registry, repository, 50, maxAttempts, 5, executor);
     }
 
     private ThreadPoolExecutor executor(int workerCount, int queueCapacity) {
