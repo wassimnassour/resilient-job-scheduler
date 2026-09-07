@@ -12,7 +12,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import tools.jackson.databind.JsonNode;
 
 import java.time.Instant;
 import java.util.List;
@@ -26,7 +25,8 @@ public class JobScheduler {
     private final JobRepository jobRepository;
     private final int batchSize;
     private final ThreadPoolExecutor jobExecutor;
-
+    private final int maxAttempts;
+    private final long retryBaseDelaySeconds;
 
     private static final Logger logger = LoggerFactory.getLogger(JobScheduler.class);
 
@@ -34,17 +34,20 @@ public class JobScheduler {
             JobHandlerRegistry jobHandlerRegistry,
             JobRepository jobRepository,
             @Value("${scheduler.batch-size:50}") int batchSize,
-            @Qualifier("jobExecutor") ThreadPoolExecutor jobExecutor
-    ) {
+            @Value("${scheduler.max-attempts:5}") int maxAttempts,
+            @Value("${scheduler.retry-base-delay-seconds:5}") long retryBaseDelaySeconds,
+            @Qualifier("jobExecutor") ThreadPoolExecutor jobExecutor) {
         this.jobHandlerRegistry = jobHandlerRegistry;
         this.jobRepository = jobRepository;
         this.batchSize = batchSize;
+        this.maxAttempts = maxAttempts;
+        this.retryBaseDelaySeconds = retryBaseDelaySeconds;
         this.jobExecutor = jobExecutor;
     }
 
-
     @Scheduled(fixedDelayString = "${scheduler.poll-interval-ms:5000}")
     public void pollDueJobs() {
+        logger.info("PollDueJobs Running");
 
         int freeSlots = availableSlots();
         if (freeSlots == 0) {
@@ -55,8 +58,7 @@ public class JobScheduler {
         List<Job> listOfJobs = jobRepository.findReadyJobs(
                 EJobStatus.PENDING,
                 Instant.now(),
-                PageRequest.of(0, jobsToFetch)
-        );
+                PageRequest.of(0, jobsToFetch));
 
         if (!listOfJobs.isEmpty()) {
             logger.info("Claiming up to {} due jobs", listOfJobs.size());
@@ -67,19 +69,24 @@ public class JobScheduler {
                     EJobStatus.RUNNING,
                     EJobStatus.PENDING,
                     job.getId(),
-                    Instant.now()
-            ) == 1;
+                    Instant.now()) == 1;
 
             if (claimed) {
                 try {
-                    jobExecutor.submit(() -> processJob(job.getId()));
+                    jobExecutor.submit(() -> {
+                        try {
+                            processJob(job.getId());
+                        } catch (InterruptedException e) {
+                            logger.error(e.getMessage(), e);
+                            throw new RuntimeException(e);
+                        }
+                    });
                 } catch (RejectedExecutionException exception) {
                     jobRepository.releaseClaim(
                             job.getId(),
                             EJobStatus.RUNNING,
                             EJobStatus.PENDING,
-                            Instant.now()
-                    );
+                            Instant.now());
                     logger.warn("Executor was full; released job {} back to PENDING", job.getId(), exception);
                 }
             }
@@ -92,11 +99,11 @@ public class JobScheduler {
                 0,
                 jobExecutor.getMaximumPoolSize()
                         - jobExecutor.getActiveCount()
-                        + jobExecutor.getQueue().remainingCapacity()
-        );
+                        + jobExecutor.getQueue().remainingCapacity());
     }
 
-    public void processJob(Long jobId) {
+    public void processJob(Long jobId) throws InterruptedException {
+//        Thread.sleep(2000);
         Job job = jobRepository.findById(jobId).orElseThrow(() -> new IllegalStateException("Can't find this Job"));
 
         logger.info("Processing job {} of type {}", job.getId(), job.getType());
@@ -105,10 +112,20 @@ public class JobScheduler {
             handler.execute(job.getPayload());
             job.setStatus(EJobStatus.SUCCEEDED);
             jobRepository.save(job);
+
         } catch (Exception e) {
-            job.setStatus(EJobStatus.FAILED);
-            jobRepository.save(job);
+            job.setAttemptsCount(job.getAttemptsCount() + 1);
             logger.error("Failed to execute job {} of type {}", job.getId(), job.getType(), e);
+
+            if (job.getAttemptsCount() < maxAttempts) {
+                job.setStatus(EJobStatus.PENDING);
+                long delaySeconds = retryBaseDelaySeconds * (1L << (job.getAttemptsCount() - 1));
+                job.setScheduledAt(Instant.now().plusSeconds(delaySeconds));
+                jobRepository.save(job);
+            } else {
+                job.setStatus(EJobStatus.EXHAUSTED);
+                jobRepository.save(job);
+            }
         }
     }
 }

@@ -40,6 +40,8 @@ public class Job {
     private Instant updatedAt;
 
     private Instant scheduledAt;
+    
+    private int attemptsCount;
 
 
     @PrePersist()

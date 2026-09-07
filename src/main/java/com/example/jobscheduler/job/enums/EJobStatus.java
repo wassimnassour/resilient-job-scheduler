@@ -4,7 +4,6 @@ public enum EJobStatus {
     PENDING,
     RUNNING,
     SUCCEEDED,
-    FAILED,
     EXHAUSTED,
     RETRYING
 }
