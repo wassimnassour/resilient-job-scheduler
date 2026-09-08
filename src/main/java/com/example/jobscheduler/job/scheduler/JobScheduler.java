@@ -1,7 +1,11 @@
 package com.example.jobscheduler.job.scheduler;
 
+import com.example.jobscheduler.eventbus.EventBus;
 import com.example.jobscheduler.job.domain.Job;
 import com.example.jobscheduler.job.enums.EJobStatus;
+import com.example.jobscheduler.job.event.JobExhaustedEvent;
+import com.example.jobscheduler.job.event.JobRetryScheduledEvent;
+import com.example.jobscheduler.job.event.JobSucceededEvent;
 import com.example.jobscheduler.job.handler.JobHandler;
 import com.example.jobscheduler.job.handler.JobHandlerRegistry;
 import com.example.jobscheduler.job.repository.JobRepository;
@@ -27,6 +31,7 @@ public class JobScheduler {
     private final ThreadPoolExecutor jobExecutor;
     private final int maxAttempts;
     private final long retryBaseDelaySeconds;
+    private final EventBus eventBus;
 
     private static final Logger logger = LoggerFactory.getLogger(JobScheduler.class);
 
@@ -36,13 +41,14 @@ public class JobScheduler {
             @Value("${scheduler.batch-size:50}") int batchSize,
             @Value("${scheduler.max-attempts:5}") int maxAttempts,
             @Value("${scheduler.retry-base-delay-seconds:5}") long retryBaseDelaySeconds,
-            @Qualifier("jobExecutor") ThreadPoolExecutor jobExecutor) {
+            @Qualifier("jobExecutor") ThreadPoolExecutor jobExecutor, EventBus eventBus) {
         this.jobHandlerRegistry = jobHandlerRegistry;
         this.jobRepository = jobRepository;
         this.batchSize = batchSize;
         this.maxAttempts = maxAttempts;
         this.retryBaseDelaySeconds = retryBaseDelaySeconds;
         this.jobExecutor = jobExecutor;
+        this.eventBus = eventBus;
     }
 
     @Scheduled(fixedDelayString = "${scheduler.poll-interval-ms:5000}")
@@ -112,6 +118,8 @@ public class JobScheduler {
             handler.execute(job.getPayload());
             job.setStatus(EJobStatus.SUCCEEDED);
             jobRepository.save(job);
+            eventBus.publish(JobSucceededEvent.now(job.getId()));
+
 
         } catch (Exception e) {
             job.setAttemptsCount(job.getAttemptsCount() + 1);
@@ -122,9 +130,13 @@ public class JobScheduler {
                 long delaySeconds = retryBaseDelaySeconds * (1L << (job.getAttemptsCount() - 1));
                 job.setScheduledAt(Instant.now().plusSeconds(delaySeconds));
                 jobRepository.save(job);
+                eventBus.publish(JobRetryScheduledEvent.now(job.getId()));
+
             } else {
                 job.setStatus(EJobStatus.EXHAUSTED);
                 jobRepository.save(job);
+                eventBus.publish(JobExhaustedEvent.now(job.getId()));
+
             }
         }
     }

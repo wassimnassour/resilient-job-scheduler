@@ -14,8 +14,10 @@ public class EventBusConfig {
     @Value("${eventbus.worker-threads:4}")
     private int workerThreads;
 
+
     @Bean()
     public EventBus eventBus() {
         return new AsyncEventBus(Executors.newFixedThreadPool(workerThreads), workerThreads);
     }
+
 }
