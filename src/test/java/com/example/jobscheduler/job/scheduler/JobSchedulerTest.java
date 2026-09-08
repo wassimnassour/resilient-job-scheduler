@@ -1,13 +1,16 @@
 package com.example.jobscheduler.job.scheduler;
 
+import com.example.jobscheduler.eventbus.EventBus;
 import com.example.jobscheduler.job.domain.Job;
 import com.example.jobscheduler.job.enums.EJobStatus;
 import com.example.jobscheduler.job.enums.EJobType;
+import com.example.jobscheduler.job.event.JobSucceededEvent;
 import com.example.jobscheduler.job.handler.JobHandler;
 import com.example.jobscheduler.job.handler.JobHandlerRegistry;
 import com.example.jobscheduler.job.repository.JobRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -21,6 +24,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -211,6 +215,50 @@ class JobSchedulerTest {
         assertFalse(job.getScheduledAt().isAfter(Instant.now().plusSeconds(20)));
     }
 
+    @Test
+    void pollDueJobs_publishesSucceededEvent_whenJobSucceeds() throws Exception {
+        EventBus eventBus = mock(EventBus.class);
+        JobRepository jobRepository = mock(JobRepository.class);
+        JobHandlerRegistry jobHandlerRegistry = mock(JobHandlerRegistry.class);
+        JobScheduler scheduler = scheduler(
+                jobHandlerRegistry,
+                jobRepository,
+                executor(1, 1),
+                4,
+                eventBus
+        );
+        Job job = job(1L, objectMapper.readTree("{\"id\":1}"));
+
+        JobHandler jobHandler = mock(JobHandler.class);
+
+        when(jobRepository.findReadyJobs(any(), any(), any()))
+                .thenReturn(List.of(job));
+        when(jobRepository.claimJob(any(), any(), eq(1L), any()))
+                .thenReturn(1);
+        when(jobRepository.findById(1L))
+                .thenReturn(Optional.of(job));
+
+        when(jobHandlerRegistry.getHandler(EJobType.LOG))
+                .thenReturn(jobHandler);
+        
+        CountDownLatch completed = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            completed.countDown();
+            return null;
+        }).when(jobHandler).execute(any());
+
+        scheduler.pollDueJobs();
+
+        assertTrue(completed.await(2, TimeUnit.SECONDS));
+
+        ArgumentCaptor<JobSucceededEvent> eventCaptor =
+                ArgumentCaptor.forClass(JobSucceededEvent.class);
+        verify(eventBus).publish(eventCaptor.capture());
+
+        assertThat(eventCaptor.getValue().jobId()).isEqualTo(1L);
+    }
+
+
     private JobScheduler scheduler(
             JobHandlerRegistry registry,
             JobRepository repository,
@@ -225,7 +273,17 @@ class JobSchedulerTest {
             ThreadPoolExecutor executor,
             int maxAttempts
     ) {
-        return new JobScheduler(registry, repository, 50, maxAttempts, 5, executor);
+        return scheduler(registry, repository, executor, maxAttempts, mock(EventBus.class));
+    }
+
+    private JobScheduler scheduler(
+            JobHandlerRegistry registry,
+            JobRepository repository,
+            ThreadPoolExecutor executor,
+            int maxAttempts,
+            EventBus eventBus
+    ) {
+        return new JobScheduler(registry, repository, 50, maxAttempts, 5, executor, eventBus);
     }
 
     private ThreadPoolExecutor executor(int workerCount, int queueCapacity) {
