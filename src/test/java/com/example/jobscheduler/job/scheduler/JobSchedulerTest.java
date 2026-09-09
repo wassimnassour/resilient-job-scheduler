@@ -225,7 +225,8 @@ class JobSchedulerTest {
                 jobRepository,
                 executor(1, 1),
                 4,
-                eventBus
+                eventBus,
+                executor(1, 1)
         );
         Job job = job(1L, objectMapper.readTree("{\"id\":1}"));
 
@@ -240,7 +241,7 @@ class JobSchedulerTest {
 
         when(jobHandlerRegistry.getHandler(EJobType.LOG))
                 .thenReturn(jobHandler);
-        
+
         CountDownLatch completed = new CountDownLatch(1);
         doAnswer(invocation -> {
             completed.countDown();
@@ -258,6 +259,43 @@ class JobSchedulerTest {
         assertThat(eventCaptor.getValue().jobId()).isEqualTo(1L);
     }
 
+    @Test
+    void processJob_retriesWhenHandlerTimesOut() throws Exception {
+        JobRepository repository = mock(JobRepository.class);
+        JobHandlerRegistry registry = mock(JobHandlerRegistry.class);
+        JobHandler handler = mock(JobHandler.class);
+        Job job = job(1L, objectMapper.readTree("{\"id\":1}"));
+        CountDownLatch interrupted = new CountDownLatch(1);
+
+        when(repository.findById(job.getId())).thenReturn(Optional.of(job));
+        when(registry.getHandler(EJobType.LOG)).thenReturn(handler);
+        doAnswer(invocation -> {
+            try {
+                Thread.sleep(60_000);
+                return null;
+            } catch (InterruptedException exception) {
+                interrupted.countDown();
+                throw exception;
+            }
+        }).when(handler).execute(job.getPayload());
+
+        JobScheduler scheduler = scheduler(
+                registry,
+                repository,
+                executor(1, 1),
+                5,
+                mock(EventBus.class),
+                executor(1, 1),
+                1
+        );
+
+        scheduler.processJob(job.getId());
+
+        assertTrue(interrupted.await(1, TimeUnit.SECONDS));
+        assertEquals(EJobStatus.PENDING, job.getStatus());
+        assertEquals(1, job.getAttemptsCount());
+    }
+
 
     private JobScheduler scheduler(
             JobHandlerRegistry registry,
@@ -273,7 +311,15 @@ class JobSchedulerTest {
             ThreadPoolExecutor executor,
             int maxAttempts
     ) {
-        return scheduler(registry, repository, executor, maxAttempts, mock(EventBus.class));
+        return scheduler(
+                registry,
+                repository,
+                executor,
+                maxAttempts,
+                mock(EventBus.class),
+                executor(executor.getMaximumPoolSize(), executor.getQueue().remainingCapacity()),
+                5
+        );
     }
 
     private JobScheduler scheduler(
@@ -283,7 +329,56 @@ class JobSchedulerTest {
             int maxAttempts,
             EventBus eventBus
     ) {
-        return new JobScheduler(registry, repository, 50, maxAttempts, 5, executor, eventBus);
+        return scheduler(
+                registry,
+                repository,
+                executor,
+                maxAttempts,
+                eventBus,
+                executor(executor.getMaximumPoolSize(), executor.getQueue().remainingCapacity()),
+                5
+        );
+    }
+
+    private JobScheduler scheduler(
+            JobHandlerRegistry registry,
+            JobRepository repository,
+            ThreadPoolExecutor executor,
+            int maxAttempts,
+            EventBus eventBus,
+            ThreadPoolExecutor handlerExecutor
+    ) {
+        return scheduler(
+                registry,
+                repository,
+                executor,
+                maxAttempts,
+                eventBus,
+                handlerExecutor,
+                5
+        );
+    }
+
+    private JobScheduler scheduler(
+            JobHandlerRegistry registry,
+            JobRepository repository,
+            ThreadPoolExecutor executor,
+            int maxAttempts,
+            EventBus eventBus,
+            ThreadPoolExecutor handlerExecutor,
+            long timeoutSeconds
+    ) {
+        return new JobScheduler(
+                registry,
+                repository,
+                50,
+                maxAttempts,
+                5,
+                timeoutSeconds,
+                executor,
+                eventBus,
+                handlerExecutor
+        );
     }
 
     private ThreadPoolExecutor executor(int workerCount, int queueCapacity) {

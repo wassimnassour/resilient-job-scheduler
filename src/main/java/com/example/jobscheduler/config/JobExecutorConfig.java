@@ -25,4 +25,20 @@ public class JobExecutorConfig {
                 new ThreadPoolExecutor.AbortPolicy()
         );
     }
+
+
+    @Bean(name = "handlerExecutor", destroyMethod = "shutdown")
+    public ThreadPoolExecutor handlerExecutor(
+            @Value("${scheduler.handler-worker-count:5}") int workerCount,
+            @Value("${scheduler.handler-queue-capacity:10}") int queueCapacity
+    ) {
+        return new ThreadPoolExecutor(
+                workerCount,
+                workerCount,
+                0,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(queueCapacity),
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+    }
 }
