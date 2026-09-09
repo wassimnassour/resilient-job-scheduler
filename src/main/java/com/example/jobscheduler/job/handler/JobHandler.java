@@ -7,5 +7,5 @@ import tools.jackson.databind.JsonNode;
 public interface JobHandler {
     EJobType getType();
 
-    void execute(JsonNode payload) throws Exception;
+    void execute(JsonNode payload) throws InterruptedException;
 }
